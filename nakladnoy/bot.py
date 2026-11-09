@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from html import escape
 from io import BytesIO
@@ -17,6 +18,7 @@ from aiogram.types import (
 
 from . import matching
 from .config import Settings
+from .counterparty_import import ImportFormatError, is_real_inn, parse_workbook
 from .csv_export import build_csv, format_number
 from .db import Repo, StoredDocument
 from .extraction import (
@@ -37,8 +39,16 @@ HELP = (
     "/navbat — tasdiqlangan, CSV kutayotganlar\n"
     "/csv — navbatdagilarni CSV qilish\n"
     "/qayta — oxirgi CSV'ni qayta olish\n"
-    "/kontragentlar — ro'yxat\n"
-    "/kontragent Nomi | INN | Договор | Izoh — qo'shish yoki yangilash"
+    "/kontragentlar nom — qidirish\n"
+    "/kontragent Nomi | INN | Договор | Izoh — qo'shish yoki yangilash\n"
+    "/admin — boshqaruv paneli, kontragentlarni Excel'dan import"
+)
+COUNTERPARTY_LIST_LIMIT = 30
+EXCEL_IMPORT_HINT = (
+    "1C'dan yuklab olingan Excel faylni (.xlsx yoki .xls) shu yerga yuboring.\n"
+    "Kerakli ustunlar: «Контрагент» yoki «Наименование» va «ИНН». "
+    "«Договор» va «Комментарий» bo'lsa, ular ham olinadi.\n"
+    "Bazaga yozishdan oldin natijani ko'rsataman."
 )
 
 
@@ -63,6 +73,10 @@ class AccessMiddleware(BaseMiddleware):
                 "Uni .env faylidagi ALLOWED_USER_IDS ga qo'shing."
             )
         return None
+
+
+def inn_text(cp: matching.Counterparty) -> str:
+    return escape(cp.inn) if cp.inn else "yo'q"
 
 
 def contract_text(cp: matching.Counterparty) -> str:
@@ -92,7 +106,7 @@ def render_card(stored: StoredDocument, duplicates: list[int]) -> str:
     if cp:
         lines += [
             f"Kontragent: <b>{escape(cp.name)}</b>",
-            f"ИНН: {escape(cp.inn)}",
+            f"ИНН: {inn_text(cp)}",
             f"Договор: {contract_text(cp)}",
         ]
     else:
@@ -109,6 +123,8 @@ def render_card(stored: StoredDocument, duplicates: list[int]) -> str:
     if errors:
         lines.append("\n⛔ " + "\n⛔ ".join(escape(e) for e in errors))
     warnings = check_warnings(doc)
+    if cp and not cp.contract:
+        warnings.append("Договор yo'q: CSV'da bo'sh bo'ladi")
     if duplicates:
         ids = ", ".join(f"#{d}" for d in duplicates)
         warnings.append(f"Shunday hujjat allaqachon bor: {ids}")
@@ -121,8 +137,6 @@ def confirm_blockers(stored: StoredDocument) -> list[str]:
     errors = blocking_errors(stored.doc)
     if stored.counterparty is None:
         errors.append("Kontragent tanlanmagan")
-    elif not stored.counterparty.contract:
-        errors.append("Kontragentda Договор yo'q: /kontragent bilan kiriting")
     return errors
 
 
@@ -277,13 +291,21 @@ def build_dispatcher(settings: Settings, repo: Repo, extractor: GeminiExtractor)
             return
         await send_export(message, *result)
 
+    async def send_counterparties(message: Message, query: str | None):
+        counterparties = await repo.counterparties()
+        if query:
+            ranked = matching.rank(query, counterparties)[:COUNTERPARTY_LIST_LIMIT]
+            shown = [c for c, score in ranked if score >= matching.CANDIDATE_SCORE]
+            footer = f"\nTopildi: {len(shown)}"
+        else:
+            shown = counterparties[:COUNTERPARTY_LIST_LIMIT]
+            footer = f"\nJami {len(counterparties)} ta. Qidirish: /kontragentlar nom"
+        lines = [f"{escape(c.name)} — {inn_text(c)}\n   {contract_text(c)}" for c in shown]
+        await answer_long(message, lines + [footer])
+
     @dp.message(Command("kontragentlar"))
-    async def on_counterparties(message: Message):
-        lines = [
-            f"{escape(c.name)} — {escape(c.inn)}\n   {contract_text(c)}"
-            for c in await repo.counterparties()
-        ]
-        await answer_long(message, lines)
+    async def on_counterparties(message: Message, command: CommandObject):
+        await send_counterparties(message, command.args)
 
     @dp.message(Command("kontragent"))
     async def on_add_counterparty(message: Message, command: CommandObject):
@@ -297,6 +319,96 @@ def build_dispatcher(settings: Settings, repo: Repo, extractor: GeminiExtractor)
         comment = parts[3] if len(parts) > 3 and parts[3] else None
         await repo.upsert_counterparty(parts[0], parts[1], parts[2], comment)
         await message.answer(f"Saqlandi: {escape(parts[0])}")
+
+    @dp.message(Command("admin"))
+    async def on_admin(message: Message):
+        counterparties = await repo.counterparties()
+        without_contract = sum(1 for c in counterparties if not c.contract)
+        await message.answer(
+            "<b>Boshqaruv paneli</b>\n\n"
+            f"Kontragentlar: {len(counterparties)}\n"
+            f"Договор kiritilmagan: {without_contract}\n"
+            f"CSV navbatida: {len(await repo.confirmed())}",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📥 Excel'dan import", callback_data="adm:import")],
+                    [InlineKeyboardButton(text="📋 Kontragentlar", callback_data="adm:list")],
+                ]
+            ),
+        )
+
+    @dp.callback_query(F.data == "adm:import")
+    async def on_admin_import(callback: CallbackQuery):
+        await callback.message.answer(EXCEL_IMPORT_HINT)
+        await callback.answer()
+
+    @dp.callback_query(F.data == "adm:list")
+    async def on_admin_list(callback: CallbackQuery):
+        await send_counterparties(callback.message, None)
+        await callback.answer()
+
+    @dp.message(F.document.file_name.regexp(r"(?i).+\.xlsx?$"))
+    async def on_excel(message: Message, bot: Bot, state: FSMContext):
+        progress = await message.answer("⏳ Excel'ni o'qiyapman...")
+        try:
+            buffer: BytesIO = await bot.download(message.document.file_id)
+            result = await asyncio.to_thread(parse_workbook, buffer.getvalue())
+        except ImportFormatError as e:
+            await progress.edit_text(f"❌ {escape(str(e))}")
+            return
+        except Exception:
+            log.exception("Excel importida xato")
+            await progress.edit_text("❌ Faylni o'qib bo'lmadi, qayta yuboring.")
+            return
+        skipped = [f"{n}-qator: {escape(reason)}" for n, reason in result.skipped[:5]]
+        if len(result.skipped) > 5:
+            skipped.append(f"... yana {len(result.skipped) - 5} ta")
+        report = "\n".join(skipped)
+        if not result.rows:
+            await progress.edit_text(f"Import qilinadigan kontragent topilmadi.\n\n{report}")
+            return
+        existing = {c.name for c in await repo.counterparties()}
+        new = sum(1 for r in result.rows if r.name not in existing)
+        lines = [
+            "<b>Excel import</b>",
+            f"Yangi: {new}",
+            f"Yangilanadi: {len(result.rows) - new}",
+            f"ИНН yo'q yoki soxta: {sum(1 for r in result.rows if not is_real_inn(r.inn))}",
+            f"Договор yo'qlar: {sum(1 for r in result.rows if not r.contract)}",
+        ]
+        if result.duplicates:
+            lines.append(f"Takroriy nom: {result.duplicates} ta, birlashtirildi")
+        if result.skipped:
+            lines += [f"\nO'tkazib yuborildi: {len(result.skipped)}", report]
+        await state.update_data(import_rows=result.rows)
+        await progress.edit_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="✅ Import qilish", callback_data="imp:ok"),
+                        InlineKeyboardButton(text="❌ Bekor", callback_data="imp:no"),
+                    ]
+                ]
+            ),
+        )
+
+    @dp.callback_query(F.data == "imp:ok")
+    async def on_import_confirm(callback: CallbackQuery, state: FSMContext):
+        rows = (await state.get_data()).get("import_rows")
+        if not rows:
+            await callback.answer("Import eskirgan, faylni qayta yuboring", show_alert=True)
+            return
+        await repo.import_counterparties(rows)
+        await state.update_data(import_rows=None)
+        await callback.message.edit_text(f"✅ {len(rows)} ta kontragent import qilindi.")
+        await callback.answer()
+
+    @dp.callback_query(F.data == "imp:no")
+    async def on_import_cancel(callback: CallbackQuery, state: FSMContext):
+        await state.update_data(import_rows=None)
+        await callback.message.edit_text("❌ Import bekor qilindi.")
+        await callback.answer()
 
     @dp.message(Editing.waiting_instruction, F.text)
     async def on_edit_instruction(message: Message, state: FSMContext):

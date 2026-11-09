@@ -1,10 +1,15 @@
 CREATE TABLE IF NOT EXISTS counterparties (
     id       SERIAL PRIMARY KEY,
     name     TEXT NOT NULL,
-    inn      TEXT NOT NULL UNIQUE,
+    inn      TEXT,
     contract TEXT,
     comment  TEXT
 );
+
+-- 1C'da ИНН bo'sh yoki soxta bo'lishi mumkin, shuning uchun kontragent kaliti nom.
+ALTER TABLE counterparties ALTER COLUMN inn DROP NOT NULL;
+ALTER TABLE counterparties DROP CONSTRAINT IF EXISTS counterparties_inn_key;
+CREATE UNIQUE INDEX IF NOT EXISTS counterparties_name_idx ON counterparties (name);
 
 CREATE TABLE IF NOT EXISTS exports (
     id         SERIAL PRIMARY KEY,

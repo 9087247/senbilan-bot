@@ -25,8 +25,11 @@ Kompyuter o'chib yonsa, `run.ps1` ni qayta ishga tushiring.
 | `/navbat` | Tasdiqlangan, CSV kutayotganlar |
 | `/csv` | Navbatdagilarni bitta CSV qilish |
 | `/qayta` | Oxirgi CSV'ni qayta olish |
-| `/kontragentlar` | Ro'yxat |
-| `/kontragent Nomi \| INN \| Договор \| Izoh` | Qo'shish yoki yangilash (INN bo'yicha) |
+| `/kontragentlar nom` | Qidirish; nomsiz bo'lsa birinchi 30 tasi |
+| `/kontragent Nomi \| INN \| Договор \| Izoh` | Qo'shish yoki yangilash (nom yoki yagona INN bo'yicha) |
+| `/admin` | Boshqaruv paneli, kontragentlarni Excel'dan import |
+
+Excel import: botga `.xlsx` yoki `.xls` yuboring. Sarlavhada «Контрагент» yoki «Наименование» va «ИНН» bo'lishi kerak, «Договор» va «Комментарий» ixtiyoriy. Bot avval natijani ko'rsatadi, ✅ dan keyin yozadi. Kalit 1C'dagi nom, chunki ИНН ko'p kontragentda bo'sh yoki soxta; ИНН'sizlar ham import qilinadi. Bir kontragentga bitta Договор saqlanadi; Excel'da bo'sh kelgan ИНН va Договор bazadagisini o'chirmaydi. Nomi faqat raqamdan iborat qatorlar o'tkazib yuboriladi.
 
 ## CSV formati
 

@@ -228,12 +228,14 @@ async def test_duplicate_detected_and_state_guards(repo):
 
 @needs_db
 @pytest.mark.asyncio
-async def test_counterparty_without_contract_blocks_until_filled(repo):
+async def test_counterparty_without_contract_only_warns(repo):
     cp = next(c for c in await repo.counterparties() if c.inn == "100000003")
     doc_id = await repo.create_draft(normalize(photo_response()), cp.id, 42, None)
-    assert any("Договор" in e for e in confirm_blockers(await repo.get(doc_id)))
+    stored = await repo.get(doc_id)
+    assert confirm_blockers(stored) == []
+    assert "⚠️ Договор yo" in render_card(stored, [])
 
     await repo.upsert_counterparty(cp.name, cp.inn, "Договор № 18-T", None)
     stored = await repo.get(doc_id)
-    assert confirm_blockers(stored) == []
+    assert "⚠️ Договор yo" not in render_card(stored, [])
     assert stored.counterparty.comment == "ROAD TRAK"

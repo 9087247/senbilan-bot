@@ -31,7 +31,7 @@ def normalize_name(name: str) -> str:
 class Counterparty:
     id: int
     name: str
-    inn: str
+    inn: str | None
     contract: str | None
     comment: str | None
 
@@ -49,12 +49,14 @@ def rank(raw: str, counterparties: list[Counterparty]) -> list[tuple[Counterpart
 
 
 def auto_match(ranked: list[tuple[Counterparty, float]]) -> Counterparty | None:
-    """Faqat bitta nomzod aniq ajralib tursagina avtomatik tanlaydi."""
+    """Bitta nomzod ajralib tursa tanlaydi; 1C'dagi takror yozuvlardan shartnomalisi afzal."""
     if not ranked or ranked[0][1] < AUTO_SCORE:
         return None
-    if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < AUTO_GAP:
-        return None
-    return ranked[0][0]
+    rivals = [cp for cp, score in ranked if ranked[0][1] - score < AUTO_GAP]
+    if len(rivals) == 1:
+        return rivals[0]
+    with_contract = [cp for cp in rivals if cp.contract]
+    return with_contract[0] if len(with_contract) == 1 else None
 
 
 def candidates(ranked: list[tuple[Counterparty, float]], limit: int = 4) -> list[Counterparty]:

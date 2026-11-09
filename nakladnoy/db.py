@@ -4,6 +4,7 @@ from pathlib import Path
 
 import asyncpg
 
+from .counterparty_import import ImportRow
 from .extraction import Document, Item
 from .matching import Counterparty
 
@@ -40,15 +41,38 @@ class Repo:
         rows = await self.pool.fetch("SELECT * FROM counterparties ORDER BY name")
         return [_counterparty(r) for r in rows]
 
+    async def import_counterparties(self, rows: list[ImportRow]) -> None:
+        """Excel'da bo'sh kelgan ИНН, Договор va izoh mavjud qiymatni o'chirmaydi."""
+        async with self.pool.acquire() as con, con.transaction():
+            await con.executemany(
+                """INSERT INTO counterparties (name, inn, contract, comment) VALUES ($1, $2, $3, $4)
+                   ON CONFLICT (name) DO UPDATE SET
+                       inn = COALESCE(EXCLUDED.inn, counterparties.inn),
+                       contract = COALESCE(EXCLUDED.contract, counterparties.contract),
+                       comment = COALESCE(EXCLUDED.comment, counterparties.comment)""",
+                [(r.name, r.inn, r.contract, r.comment) for r in rows],
+            )
+
     async def upsert_counterparty(
         self, name: str, inn: str, contract: str | None, comment: str | None
     ) -> None:
-        await self.pool.execute(
-            """INSERT INTO counterparties (name, inn, contract, comment) VALUES ($1, $2, $3, $4)
-               ON CONFLICT (inn) DO UPDATE SET name = EXCLUDED.name, contract = EXCLUDED.contract,
-                   comment = COALESCE(EXCLUDED.comment, counterparties.comment)""",
-            name, inn, contract, comment,
-        )
+        """Avval nom, keyin yagona ИНН bo'yicha izlaydi; soxta umumiy ИНН boshqalarni buzmaydi."""
+        async with self.pool.acquire() as con, con.transaction():
+            target = await con.fetchval("SELECT id FROM counterparties WHERE name = $1", name)
+            if target is None:
+                same_inn = await con.fetch("SELECT id FROM counterparties WHERE inn = $1", inn)
+                target = same_inn[0]["id"] if len(same_inn) == 1 else None
+            if target is None:
+                await con.execute(
+                    "INSERT INTO counterparties (name, inn, contract, comment) VALUES ($1, $2, $3, $4)",
+                    name, inn, contract, comment,
+                )
+            else:
+                await con.execute(
+                    """UPDATE counterparties SET name = $2, inn = $3, contract = $4,
+                           comment = COALESCE($5, comment) WHERE id = $1""",
+                    target, name, inn, contract, comment,
+                )
 
     @staticmethod
     async def _write_items(con, doc_id: int, items: list[Item]) -> None:

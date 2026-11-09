@@ -4,3 +4,5 @@ google-genai>=1.0,<3
 pydantic>=2.7,<3
 python-dotenv>=1.0,<2
 rapidfuzz>=3.9,<4
+openpyxl>=3.1,<4
+xlrd>=2.0,<3

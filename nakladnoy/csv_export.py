@@ -39,7 +39,7 @@ def build_csv(documents: list[StoredDocument], settings: Settings) -> bytes:
         total = format_number(lines_total(doc))
         for item in doc.items:
             writer.writerow([
-                date_text, "", "", cp.inn, "", cp.name, cp.contract or "", total,
+                date_text, "", "", cp.inn or "", "", cp.name, cp.contract or "", total,
                 settings.currency, "", settings.department, settings.vat_rate, "", date_text,
                 "", "", "", "", settings.responsible, "", cp.comment or "",
                 stored.id, item.name, item.unit,
